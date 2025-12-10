@@ -112,11 +112,16 @@ python train_grpo.py
 
 **Link Search Agent：**
 ```bash
-# 设置数据库路径和 HuggingFace token
+# 1. 准备数据库（如果需要）
+bash scripts/generate_database.sh  # 从 PostgreSQL 生成
+# 或
+cp /path/to/profiles.db link_search_agent/data/profiles.db
+
+# 2. 设置环境变量
 export PROFILE_DB_PATH="/path/to/profiles.db"
 export HF_TOKEN="your_huggingface_token"
 
-# 开始训练
+# 3. 开始训练
 python train_grpo_linksearch.py --mode masked
 ```
 

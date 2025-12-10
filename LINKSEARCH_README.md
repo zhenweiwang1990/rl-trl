@@ -12,7 +12,9 @@
 - ✅ Process rewards 用于改进搜索策略
 - ✅ Wandb 集成用于监控训练
 
-## 📋 数据集
+## 📋 数据集和数据库
+
+### HuggingFace 数据集
 
 Link Search Agent 使用 HuggingFace 数据集：`gboxai/linksearch`
 
@@ -21,21 +23,46 @@ Link Search Agent 使用 HuggingFace 数据集：`gboxai/linksearch`
 - 正确的 LinkedIn handles（ground truth）
 - 训练集和测试集分割
 
+### SQLite 数据库
+
+此外还需要一个 SQLite 数据库包含 LinkedIn 个人资料数据。详细的数据库设置说明请查看 [DATABASE_SETUP.md](DATABASE_SETUP.md)。
+
+**快速设置**：
+```bash
+# 如果有 PostgreSQL 数据库
+bash scripts/generate_database.sh
+
+# 或者使用现有 SQLite 数据库
+cp /path/to/profiles.db link_search_agent/data/profiles.db
+```
+
 ## 🚀 快速开始
 
 ### 1. 准备数据库
 
 Link Search Agent 需要一个 SQLite 数据库包含 LinkedIn 个人资料。
 
-数据库应该包含以下表：
+**选项 A: 从 PostgreSQL 生成**（推荐）
+```bash
+# 1. 配置 PostgreSQL 连接
+cp env.linksearch.example env.linksearch
+nano env.linksearch  # 设置 PG_HOST, PG_USER, PG_PASSWORD, PG_DATABASE
+
+# 2. 生成数据库
+bash scripts/generate_database.sh
+```
+
+**选项 B: 使用现有数据库**
+```bash
+cp /path/to/profiles.db link_search_agent/data/profiles.db
+```
+
+详细说明请查看 [DATABASE_SETUP.md](DATABASE_SETUP.md)
+
+数据库必须包含以下表：
 - `profiles`: 个人资料信息（id, name, linkedin_handle, summary, about, skills）
 - `experiences`: 工作经历
 - `educations`: 教育背景
-
-设置数据库路径：
-```bash
-export PROFILE_DB_PATH="/path/to/profiles.db"
-```
 
 ### 2. 设置 HuggingFace Token
 
