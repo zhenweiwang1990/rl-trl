@@ -1,0 +1,53 @@
+# Link Search Agent Training Configuration
+
+# Model settings
+model_name: "unsloth/Qwen3-32B"
+max_seq_length: 32768
+load_in_4bit: true
+
+# LoRA settings
+lora_r: 16
+lora_alpha: 16
+lora_dropout: 0.0
+target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+# Training settings
+num_train_epochs: 3
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 1.0e-5
+warmup_steps: 10
+logging_steps: 1
+save_steps: 10
+eval_steps: 10
+save_total_limit: 3
+
+# GRPO settings
+num_generations: 4  # Number of rollouts per query
+max_prompt_length: 4096
+max_completion_length: 4096
+temperature: 0.7
+top_p: 0.9
+beta: 0.01  # KL divergence weight
+
+# Link Search specific
+max_turns: 15  # Maximum turns for the agent
+max_profiles: 10  # Target number of profiles to find
+train_dataset_size: 1000
+eval_dataset_size: 100
+target_accuracy: 0.80  # Stop training when reaching this accuracy
+
+# Output
+output_dir: "outputs/qwen3-32b-linksearch"
+wandb_project: "qwen3-32b-grpo-linksearch"
+wandb_name: null
+
+# Misc
+seed: 42
+bf16: true
+gradient_checkpointing: true
+optim: "adamw_8bit"
+max_grad_norm: 1.0
+report_to: "wandb"
+verbose: true

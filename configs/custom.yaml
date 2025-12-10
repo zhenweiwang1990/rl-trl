@@ -1,0 +1,61 @@
+# Custom configuration example for Qwen3-32B GRPO Training
+# Copy and modify this file for your specific needs
+
+# Model settings
+model_name: "unsloth/Qwen3-32B"
+max_seq_length: 8192  # Longer context
+load_in_4bit: false    # Full precision for better quality
+
+# LoRA settings (higher rank for more capacity)
+lora_r: 32
+lora_alpha: 32
+lora_dropout: 0.05
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+# Dataset
+# Options: 
+#   - "openai/gsm8k" (math problems)
+#   - "trl-internal-testing/tldr-preference-trl-style" (summarization)
+dataset_name: "openai/gsm8k"
+
+# Training settings
+output_dir: "outputs/qwen3-32b-custom"
+num_train_epochs: 5
+per_device_train_batch_size: 1  # Reduce if OOM
+per_device_eval_batch_size: 2
+gradient_accumulation_steps: 8   # Increase for larger effective batch size
+learning_rate: 3.0e-5
+warmup_steps: 200
+max_grad_norm: 1.0
+
+# Logging and saving
+logging_steps: 5
+save_steps: 250
+eval_steps: 250
+save_total_limit: 5
+
+# GRPO specific settings
+num_generations: 8  # More candidates
+max_prompt_length: 2048
+max_completion_length: 1024   # Longer responses
+temperature: 0.8
+top_p: 0.95
+beta: 0.02
+
+# Optimization
+seed: 42
+bf16: true
+gradient_checkpointing: true
+optim: "adamw_8bit"
+
+# Wandb settings
+report_to: "wandb"
+wandb_project: "qwen3-32b-custom"
+wandb_name: "qwen3-custom-run-1"

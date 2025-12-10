@@ -1,0 +1,61 @@
+# Qwen3-32B GRPO Training Configuration
+
+# Model settings
+model_name: "unsloth/Qwen3-32B-128K"
+max_seq_length: 8192
+load_in_4bit: true
+
+# LoRA settings
+lora_r: 16
+lora_alpha: 16
+lora_dropout: 0.0
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+# Dataset
+# Options: 
+#   - "openai/gsm8k" (math problems)
+#   - "trl-internal-testing/tldr-preference-trl-style" (summarization)
+#   - "openai/summarize_from_feedback" (summarization with feedback)
+dataset_name: "openai/gsm8k"
+
+# Training settings
+output_dir: "outputs/qwen3-32b-grpo"
+num_train_epochs: 3
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 5.0e-5
+warmup_steps: 100
+max_grad_norm: 1.0
+
+# Logging and saving
+logging_steps: 10
+save_steps: 500
+eval_steps: 500
+save_total_limit: 3
+
+# GRPO specific settings
+num_generations: 4
+max_prompt_length: 1024
+max_completion_length: 512
+temperature: 0.7
+top_p: 0.9
+beta: 0.01
+
+# Optimization
+seed: 42
+bf16: true
+gradient_checkpointing: true
+optim: "adamw_8bit"
+
+# Wandb settings
+report_to: "wandb"
+wandb_project: "qwen3-32b-grpo"
+wandb_name: null  # Auto-generated if null

@@ -1,0 +1,52 @@
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Training outputs
+outputs/
+checkpoints/
+logs/
+wandb/
+runs/
+
+# Data
+data/
+*.csv
+
+# Model files (will be downloaded in container)
+*.bin
+*.safetensors
+*.gguf
+
+# Environment
+.env
+.env.local
+
+# Cache
+.cache/
+
+# Documentation
+*.md
+docs/
+
+# Docker
+Dockerfile
+.dockerignore

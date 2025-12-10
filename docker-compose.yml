@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  qwen3-grpo:
+    image: qwen3-grpo:latest
+    container_name: qwen3-grpo-train
+    build:
+      context: .
+      dockerfile: Dockerfile
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - HF_TOKEN=${HF_TOKEN}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    volumes:
+      - .:/workspace
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./outputs:/workspace/outputs
+      - ./data:/workspace/data
+      - ./logs:/workspace/logs
+    ports:
+      - "6006:6006"  # TensorBoard
+      - "8888:8888"  # Jupyter (optional)
+    shm_size: '32gb'
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
