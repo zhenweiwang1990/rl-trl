@@ -44,6 +44,8 @@ class TurnTimingLog:
     llm_generation_time_ms: float = 0.0  # LLM generation time
     llm_input_tokens: int = 0  # Input tokens count
     llm_output_tokens: int = 0  # Output tokens count
+    llm_raw_output: str = ""  # Raw model output (for debugging thinking)
+    llm_raw_output_length: int = 0  # Length of raw output
     tool_execution_time_ms: float = 0.0  # Total tool execution time for this turn
     turn_total_time_ms: float = 0.0  # Total time for this turn
     timestamp: str = ""
@@ -171,12 +173,15 @@ class RolloutLogBuilder:
         generation_time_ms: float,
         input_tokens: int,
         output_tokens: int,
+        raw_output: str = "",
     ) -> None:
         """Log LLM generation metrics."""
         if self.current_turn_timing:
             self.current_turn_timing.llm_generation_time_ms = generation_time_ms
             self.current_turn_timing.llm_input_tokens = input_tokens
             self.current_turn_timing.llm_output_tokens = output_tokens
+            self.current_turn_timing.llm_raw_output = raw_output
+            self.current_turn_timing.llm_raw_output_length = len(raw_output)
     
     def log_tool_call(
         self,

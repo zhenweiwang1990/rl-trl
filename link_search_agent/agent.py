@@ -173,11 +173,21 @@ class LinkSearchAgent:
                         generation_time_ms=llm_time_ms,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
+                        raw_output=raw_content,
                     )
                 
                 if verbose:
                     print(f"⏱️  LLM Generation: {llm_time_ms:.2f}ms | "
                           f"Tokens: {input_tokens} in / {output_tokens} out")
+                    
+                    # Show raw model output for debugging (controlled by show_raw_output flag)
+                    if self.policy_config.show_raw_output and raw_content:
+                        print(f"\n🔍 Raw Model Output ({len(raw_content)} chars, {output_tokens} tokens):")
+                        print(f"{'─'*80}")
+                        print(raw_content[:1000])  # Show first 1000 chars
+                        if len(raw_content) > 1000:
+                            print(f"\n... (truncated, {len(raw_content) - 1000} more chars)")
+                        print(f"{'─'*80}")
                 
                 # Add assistant message
                 assistant_msg = {"role": "assistant"}

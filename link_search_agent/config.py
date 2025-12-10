@@ -60,6 +60,7 @@ class PolicyConfig(BaseModel):
     use_tools: bool = True
     stupid_simple_reward_fn: bool = False
     verbose: bool = True
+    show_raw_output: bool = False  # Show raw model output for debugging thinking
     
     # Sampling diversity settings (for GRPO exploration)
     enable_dynamic_temperature: bool = True
