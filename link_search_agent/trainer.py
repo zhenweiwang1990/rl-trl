@@ -276,18 +276,31 @@ class LinkSearchGRPOTrainer:
         self,
         queries: List[LinkSearchQuery],
         is_eval: bool = False,
-    ) -> List[TrajectoryGroup]:
-        """Collect rollouts for a batch of queries."""
+    ) -> Tuple[List[TrajectoryGroup], Dict[str, float]]:
+        """Collect rollouts for a batch of queries.
+        
+        Returns:
+            Tuple of (groups, timing_dict) where timing_dict contains:
+            - total_time_ms: Total time for all rollouts
+            - avg_query_time_ms: Average time per query
+            - avg_group_time_ms: Average time per group
+        """
         groups = []
         all_rollout_logs = []
         
         num_rollouts = 1 if is_eval else self.num_rollouts
         
+        collection_start = time.time()
+        group_times = []
+        query_times = []
+        
         for group_id, query in enumerate(queries):
+            group_start = time.time()
             group = TrajectoryGroup(query=query, group_id=group_id)
             
             for rollout_idx in range(num_rollouts):
                 try:
+                    query_start = time.time()
                     conversation, reward, rubric, rollout_log = await execute_rollout(
                         query=query,
                         model=self.model,
@@ -300,6 +313,8 @@ class LinkSearchGRPOTrainer:
                         enable_detailed_logging=self.enable_detailed_logging,
                         training_step=self.global_step,
                     )
+                    query_time_ms = (time.time() - query_start) * 1000.0
+                    query_times.append(query_time_ms)
                     
                     sample = TrajectorySample(
                         query_id=query.id,
@@ -320,14 +335,29 @@ class LinkSearchGRPOTrainer:
                     logger.error(f"Rollout failed for query {query.id}: {e}")
                     continue
             
+            group_time_ms = (time.time() - group_start) * 1000.0
+            group_times.append(group_time_ms)
+            
             if group.samples:
                 groups.append(group)
+        
+        total_time_ms = (time.time() - collection_start) * 1000.0
+        
+        timing_dict = {
+            "total_time_ms": total_time_ms,
+            "avg_query_time_ms": np.mean(query_times) if query_times else 0.0,
+            "avg_group_time_ms": np.mean(group_times) if group_times else 0.0,
+            "min_query_time_ms": np.min(query_times) if query_times else 0.0,
+            "max_query_time_ms": np.max(query_times) if query_times else 0.0,
+            "min_group_time_ms": np.min(group_times) if group_times else 0.0,
+            "max_group_time_ms": np.max(group_times) if group_times else 0.0,
+        }
         
         # Save rollout logs
         if self.enable_detailed_logging and all_rollout_logs:
             save_rollout_logs(all_rollout_logs, str(self.output_dir / "rollout_logs"))
         
-        return groups
+        return groups, timing_dict
     
     def _compute_advantages(self, groups: List[TrajectoryGroup]) -> List[TrajectoryGroup]:
         """Compute GRPO advantages for each group."""
@@ -581,7 +611,7 @@ class LinkSearchGRPOTrainer:
         eval_start = time.time()
         
         loop = asyncio.get_event_loop()
-        groups = loop.run_until_complete(
+        groups, eval_timing = loop.run_until_complete(
             self._collect_rollouts(self.eval_queries[:num_eval_samples], is_eval=True)
         )
         
@@ -617,7 +647,7 @@ class LinkSearchGRPOTrainer:
         
         eval_time = time.time() - eval_start
         
-        # Create evaluation statistics dictionary
+        # Create evaluation statistics dictionary with detailed timing
         eval_stats = {
             "step": self.global_step if not is_baseline else -1,
             "is_baseline": is_baseline,
@@ -634,7 +664,11 @@ class LinkSearchGRPOTrainer:
             "avg_hits": float(avg_hits),
             "found_correct_profile": found_correct_profile,
             "avg_turns": float(avg_turns),
-            "eval_time": float(eval_time),
+            "eval_time_seconds": float(eval_time),
+            "eval_time_ms": float(eval_time * 1000.0),
+            "avg_query_time_ms": eval_timing.get("avg_query_time_ms", 0.0),
+            "min_query_time_ms": eval_timing.get("min_query_time_ms", 0.0),
+            "max_query_time_ms": eval_timing.get("max_query_time_ms", 0.0),
         }
         
         # Save to file
@@ -648,7 +682,7 @@ class LinkSearchGRPOTrainer:
         with open(eval_log_file, "w") as f:
             json.dump(eval_stats, f, indent=2)
         
-        # Print evaluation results
+        # Print evaluation results with detailed timing
         print("", flush=True)
         print(f"📊 {eval_type} Results:", flush=True)
         print(f"  Accuracy: {accuracy:.2%} ({correct_answers}/{len(rubrics)})", flush=True)
@@ -657,7 +691,10 @@ class LinkSearchGRPOTrainer:
         print(f"  Avg Reward: {avg_reward:.3f} (median: {median_reward:.3f}, std: {std_reward:.3f})", flush=True)
         print(f"  Found Correct Profile: {found_correct_profile}/{len(rubrics)} ({found_correct_profile/max(len(rubrics), 1)*100:.1f}%)", flush=True)
         print(f"  Avg Turns: {avg_turns:.2f}", flush=True)
-        print(f"  Evaluation Time: {eval_time:.1f}s", flush=True)
+        print(f"\n⏱️  Timing Breakdown:", flush=True)
+        print(f"  Total Eval Time: {eval_time:.2f}s ({eval_time*1000:.0f}ms)", flush=True)
+        print(f"  Avg Query Time: {eval_timing.get('avg_query_time_ms', 0):.2f}ms", flush=True)
+        print(f"  Query Time Range: {eval_timing.get('min_query_time_ms', 0):.2f}ms - {eval_timing.get('max_query_time_ms', 0):.2f}ms", flush=True)
         print(f"💾 Eval stats saved to: {eval_log_file}", flush=True)
         print("="*80, flush=True)
         print("", flush=True)
@@ -753,11 +790,13 @@ class LinkSearchGRPOTrainer:
             # Collect rollouts
             rollout_start = time.time()
             loop = asyncio.get_event_loop()
-            groups = loop.run_until_complete(self._collect_rollouts(batch_queries))
+            groups, rollout_timing = loop.run_until_complete(self._collect_rollouts(batch_queries))
             rollout_time = time.time() - rollout_start
             
             # Compute advantages
+            advantage_start = time.time()
             groups = self._compute_advantages(groups)
+            advantage_time = time.time() - advantage_start
             
             # Training step
             train_start = time.time()
@@ -791,6 +830,7 @@ class LinkSearchGRPOTrainer:
                 self.optimizer.step()
             
             train_time = time.time() - train_start
+            step_total_time = time.time() - step_start
             
             # Collect metrics
             all_rewards = [s.reward for g in groups for s in g.samples]
@@ -838,18 +878,26 @@ class LinkSearchGRPOTrainer:
                 print(f"  - Groups kept for training: {groups_kept}", flush=True)
                 print(f"  - Groups filtered (low variance): {groups_filtered}", flush=True)
                 print(f"  - Rollouts finished early: {num_early_exit}/{len(all_rewards)}", flush=True)
-                print(f"  - Rollout time: {rollout_time:.1f}s", flush=True)
-                print(f"  - Training time: {train_time:.1f}s", flush=True)
+                print(f"\n⏱️  Timing Breakdown (Step {self.global_step}):", flush=True)
+                print(f"  - Rollout collection: {rollout_time:.2f}s ({rollout_time*1000:.0f}ms)", flush=True)
+                print(f"    • Avg query time: {rollout_timing.get('avg_query_time_ms', 0):.2f}ms", flush=True)
+                print(f"    • Avg group time: {rollout_timing.get('avg_group_time_ms', 0):.2f}ms", flush=True)
+                print(f"    • Query time range: {rollout_timing.get('min_query_time_ms', 0):.0f}-{rollout_timing.get('max_query_time_ms', 0):.0f}ms", flush=True)
+                print(f"  - Advantage computation: {advantage_time:.2f}s ({advantage_time*1000:.0f}ms)", flush=True)
+                print(f"  - Training step: {train_time:.2f}s ({train_time*1000:.0f}ms)", flush=True)
+                print(f"  - Step total: {step_total_time:.2f}s ({step_total_time*1000:.0f}ms)", flush=True)
                 print("="*80, flush=True)
             else:
-                # Simple mode
+                # Simple mode with timing
                 print(
                     f"Step {self.global_step}/{self.max_steps} | "
                     f"Loss: {metrics.loss:.4f} | "
                     f"Score: {metrics.avg_score:.3f} | "
                     f"Reward: {metrics.avg_reward:.3f} | "
                     f"Groups: {groups_kept}/{len(groups)} | "
-                    f"Rollout: {rollout_time:.1f}s",
+                    f"Rollout: {rollout_time:.1f}s | "
+                    f"Train: {train_time:.1f}s | "
+                    f"Total: {step_total_time:.1f}s",
                     flush=True
                 )
             

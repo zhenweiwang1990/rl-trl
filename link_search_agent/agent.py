@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 from typing import List, Dict, Any, Optional, Tuple, Set
 from dataclasses import asdict
 
@@ -143,7 +144,12 @@ class LinkSearchAgent:
         
         # Agent loop
         for turn in range(self.policy_config.max_turns):
+            turn_start_time = time.time()
             rubric.num_turns += 1
+            
+            # Start turn timing
+            if self.log_builder:
+                self.log_builder.start_turn(turn + 1)
             
             if verbose:
                 print(f"\n{'─'*80}")
@@ -152,12 +158,26 @@ class LinkSearchAgent:
             
             try:
                 # Generate model response
+                llm_start = time.time()
                 response_message, raw_content, input_tokens, output_tokens = self._generate_response(
                     conversation, verbose
                 )
+                llm_time_ms = (time.time() - llm_start) * 1000.0
                 
                 rubric.total_input_tokens += input_tokens
                 rubric.total_output_tokens += output_tokens
+                
+                # Log LLM generation metrics
+                if self.log_builder:
+                    self.log_builder.log_llm_generation(
+                        generation_time_ms=llm_time_ms,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                    )
+                
+                if verbose:
+                    print(f"⏱️  LLM Generation: {llm_time_ms:.2f}ms | "
+                          f"Tokens: {input_tokens} in / {output_tokens} out")
                 
                 # Add assistant message
                 assistant_msg = {"role": "assistant"}
@@ -183,6 +203,7 @@ class LinkSearchAgent:
                 
                 # Handle tool calls
                 if response_message.get("tool_calls"):
+                    tools_start = time.time()
                     should_break = await self._execute_tool_calls(
                         response_message["tool_calls"],
                         query,
@@ -195,7 +216,13 @@ class LinkSearchAgent:
                         gold_set,
                         final_results,
                         verbose,
+                        turn_number=turn + 1,
                     )
+                    tools_time_ms = (time.time() - tools_start) * 1000.0
+                    
+                    if verbose and response_message.get("tool_calls"):
+                        print(f"⏱️  Tools Execution: {tools_time_ms:.2f}ms")
+                    
                     if should_break:
                         break
                 
@@ -225,6 +252,14 @@ class LinkSearchAgent:
                     traceback.print_exc()
                 rubric.cant_parse_tool_call = True
                 break
+            finally:
+                # Finish turn timing
+                turn_total_time_ms = (time.time() - turn_start_time) * 1000.0
+                if self.log_builder:
+                    self.log_builder.finish_turn(turn_total_time_ms)
+                
+                if verbose:
+                    print(f"⏱️  Turn Total Time: {turn_total_time_ms:.2f}ms")
         
         # Check if ran out of turns
         if rubric.num_turns >= self.policy_config.max_turns and not rubric.attempted_answer:
@@ -407,6 +442,7 @@ class LinkSearchAgent:
         gold_set: Set[str],
         final_results: Dict[str, Any],
         verbose: bool,
+        turn_number: int = 0,
     ) -> bool:
         """Execute tool calls."""
         should_break = False
@@ -436,6 +472,7 @@ class LinkSearchAgent:
                 print(f"   Arguments: {json.dumps(tool_args, indent=2)[:200]}")
             
             # Execute tool
+            tool_exec_start = time.time()
             tool_result, should_break_inner = await self._execute_single_tool(
                 tool_name,
                 tool_args,
@@ -449,11 +486,13 @@ class LinkSearchAgent:
                 final_results,
                 verbose,
             )
+            tool_exec_time_ms = (time.time() - tool_exec_start) * 1000.0
             
             if verbose:
                 print(f"\n📊 Tool Result:")
                 result_str = json.dumps(tool_result, indent=2)
                 print(f"   {result_str[:300]}...")
+                print(f"⏱️  Tool Execution Time: {tool_exec_time_ms:.2f}ms")
             
             # Add tool result to conversation
             tool_msg = {
@@ -466,11 +505,12 @@ class LinkSearchAgent:
             if self.log_builder:
                 self.log_builder.log_conversation_message(tool_msg)
                 self.log_builder.log_tool_call(
-                    turn_number=rubric.num_turns,
+                    turn_number=turn_number,
                     tool_name=tool_name,
                     tool_arguments=tool_args,
                     tool_result=tool_result,
                     error=tool_result.get("error") if isinstance(tool_result, dict) else None,
+                    execution_time_ms=tool_exec_time_ms,
                 )
             
             if should_break_inner:
