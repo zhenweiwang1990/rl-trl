@@ -166,6 +166,7 @@ echo ""
 
 # Run Docker container with proper environment file mounting
 docker run -d --rm \
+    --restart always \
     --name "$CONTAINER_NAME" \
     --runtime=nvidia \
     --gpus all \
