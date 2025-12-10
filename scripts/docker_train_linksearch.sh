@@ -165,7 +165,7 @@ echo "Training command: $TRAIN_CMD"
 echo ""
 
 # Run Docker container with proper environment file mounting
-docker run -d --rm \
+docker run -d \
     --restart always \
     --name "$CONTAINER_NAME" \
     --runtime=nvidia \

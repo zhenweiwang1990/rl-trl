@@ -38,6 +38,7 @@ python-dotenv>=1.0.0
 # Optimization
 deepspeed>=0.16.0
 ninja>=1.11.0
+flash-attn>=2.5.8  # Critical for fast inference on long sequences
 
 # Utilities
 huggingface-hub>=0.27.0
