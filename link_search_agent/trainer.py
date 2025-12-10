@@ -195,14 +195,34 @@ class LinkSearchGRPOTrainer:
     
     def _load_checkpoint(self, checkpoint_path: Path):
         """Load training state from checkpoint."""
+        logger.info(f"📂 Loading training state from checkpoint: {checkpoint_path}")
+        
+        # Load optimizer state
+        optimizer_path = checkpoint_path / "optimizer.pt"
+        if optimizer_path.exists():
+            self.optimizer.load_state_dict(torch.load(optimizer_path))
+            logger.info("✓ Optimizer state loaded")
+        else:
+            logger.warning("⚠️  Optimizer state not found, starting with fresh optimizer")
+        
+        # Load training state
         state_file = checkpoint_path / "training_state.json"
         if state_file.exists():
             with open(state_file, 'r') as f:
                 state = json.load(f)
+            
             self.global_step = state.get("global_step", 0)
             self.best_accuracy = state.get("best_accuracy", 0.0)
-            self.best_model_path = state.get("best_model_path")
-            logger.info(f"Loaded training state: step={self.global_step}, best_acc={self.best_accuracy:.2%}")
+            best_model_path_str = state.get("best_model_path")
+            self.best_model_path = Path(best_model_path_str) if best_model_path_str else None
+            self.evals_without_improvement = state.get("evals_without_improvement", 0)
+            
+            logger.info(f"✓ Training state loaded:")
+            logger.info(f"  - Global step: {self.global_step}")
+            logger.info(f"  - Best accuracy: {self.best_accuracy:.2%}")
+            logger.info(f"  - Evals without improvement: {self.evals_without_improvement}")
+        else:
+            logger.warning("⚠️  Training state not found, starting from step 0")
     
     def _save_checkpoint(self, metrics: TrainingMetrics):
         """Save model checkpoint and training state."""
@@ -213,22 +233,43 @@ class LinkSearchGRPOTrainer:
         self.model.save_pretrained(str(checkpoint_dir))
         self.tokenizer.save_pretrained(str(checkpoint_dir))
         
+        # Save optimizer state
+        torch.save(self.optimizer.state_dict(), checkpoint_dir / "optimizer.pt")
+        
         # Save training state
-        state = {
+        training_state = {
             "global_step": self.global_step,
             "best_accuracy": self.best_accuracy,
             "best_model_path": str(self.best_model_path) if self.best_model_path else None,
-            "metrics": {
-                "loss": metrics.loss,
-                "accuracy": metrics.accuracy,
-                "avg_reward": metrics.avg_reward,
-                "avg_score": metrics.avg_score,
-            }
+            "evals_without_improvement": self.evals_without_improvement,
         }
         with open(checkpoint_dir / "training_state.json", 'w') as f:
-            json.dump(state, f, indent=2)
+            json.dump(training_state, f, indent=2)
         
-        logger.info(f"Checkpoint saved: {checkpoint_dir}")
+        # Save training metadata with detailed metrics
+        training_metadata = {
+            "step": self.global_step,
+            "accuracy": metrics.accuracy,
+            "metrics": {
+                "loss": metrics.loss,
+                "policy_loss": metrics.policy_loss,
+                "kl_loss": metrics.kl_loss,
+                "avg_reward": metrics.avg_reward,
+                "max_reward": metrics.max_reward,
+                "min_reward": metrics.min_reward,
+                "avg_score": metrics.avg_score,
+                "avg_hits": metrics.avg_hits,
+                "reward_std": getattr(metrics, 'reward_std', 0.0),
+                "rollout_time": metrics.rollout_time,
+                "training_time": metrics.training_time,
+                "groups_kept": metrics.groups_kept,
+                "groups_filtered": metrics.groups_filtered,
+            }
+        }
+        with open(checkpoint_dir / "training_metadata.json", 'w') as f:
+            json.dump(training_metadata, f, indent=2)
+        
+        logger.info(f"💾 Model and training state saved to: {checkpoint_dir}")
         return checkpoint_dir
     
     async def _collect_rollouts(
@@ -518,33 +559,108 @@ class LinkSearchGRPOTrainer:
         
         return total_loss, metrics
     
-    def _run_evaluation(self) -> TrainingMetrics:
+    def _run_evaluation(self, is_baseline: bool = False) -> TrainingMetrics:
         """Run evaluation on eval set."""
-        logger.info("Running evaluation...")
+        eval_type = "BASELINE EVALUATION" if is_baseline else "EVALUATION"
+        num_eval_samples = min(50, len(self.eval_queries))
+        
+        print("", flush=True)
+        print("="*80, flush=True)
+        print(f"🔍 {eval_type} - Step {self.global_step}", flush=True)
+        print("="*80, flush=True)
+        print(f"Evaluating on {num_eval_samples} queries...", flush=True)
+        if not is_baseline:
+            print(f"Current best accuracy: {self.best_accuracy:.2%}", flush=True)
+            print(f"Evaluations without improvement: {self.evals_without_improvement}/{self.patience}", flush=True)
+        print("="*80, flush=True)
+        
+        logger.info(f"Running {eval_type.lower()} on {num_eval_samples} queries...")
         
         self.model.eval()
         
+        eval_start = time.time()
+        
         loop = asyncio.get_event_loop()
         groups = loop.run_until_complete(
-            self._collect_rollouts(self.eval_queries[:min(50, len(self.eval_queries))], is_eval=True)
+            self._collect_rollouts(self.eval_queries[:num_eval_samples], is_eval=True)
         )
         
         rewards = []
         scores = []
         hits = []
+        rubrics = []
         
         for group in groups:
             for sample in group.samples:
                 rewards.append(sample.reward)
                 scores.append(sample.rubric.score)
                 hits.append(sample.rubric.num_correct_handles)
+                rubrics.append(sample.rubric)
         
         avg_reward = np.mean(rewards) if rewards else 0.0
         avg_score = np.mean(scores) if scores else 0.0
         avg_hits = np.mean(hits) if hits else 0.0
+        median_reward = float(np.median(rewards)) if rewards else 0.0
+        std_reward = float(np.std(rewards)) if rewards else 0.0
         
         # Accuracy = percentage with score > 0.5
         accuracy = np.mean([1 if s > 0.5 else 0 for s in scores]) if scores else 0.0
+        correct_answers = int(accuracy * len(scores)) if scores else 0
+        
+        # Collect detailed rubric statistics
+        attempted_answer = sum(1 for r in rubrics if r.num_correct_handles > 0 or r.score > 0)
+        found_correct_profile = sum(1 for r in rubrics if r.num_correct_handles > 0)
+        
+        # Calculate average turns for different outcomes
+        turns_list = [len(s.conversation) // 2 for g in groups for s in g.samples]
+        avg_turns = np.mean(turns_list) if turns_list else 0.0
+        
+        eval_time = time.time() - eval_start
+        
+        # Create evaluation statistics dictionary
+        eval_stats = {
+            "step": self.global_step if not is_baseline else -1,
+            "is_baseline": is_baseline,
+            "accuracy": float(accuracy),
+            "correct_answers": correct_answers,
+            "total_samples": len(rubrics),
+            "attempted_answer": attempted_answer,
+            "avg_reward": float(avg_reward),
+            "median_reward": median_reward,
+            "std_reward": std_reward,
+            "min_reward": float(min(rewards)) if rewards else 0.0,
+            "max_reward": float(max(rewards)) if rewards else 0.0,
+            "avg_score": float(avg_score),
+            "avg_hits": float(avg_hits),
+            "found_correct_profile": found_correct_profile,
+            "avg_turns": float(avg_turns),
+            "eval_time": float(eval_time),
+        }
+        
+        # Save to file
+        if is_baseline:
+            eval_log_file = self.output_dir / "baseline_eval.json"
+        else:
+            eval_log_dir = self.output_dir / "eval_logs"
+            eval_log_dir.mkdir(parents=True, exist_ok=True)
+            eval_log_file = eval_log_dir / f"eval_step_{self.global_step:04d}.json"
+        
+        with open(eval_log_file, "w") as f:
+            json.dump(eval_stats, f, indent=2)
+        
+        # Print evaluation results
+        print("", flush=True)
+        print(f"📊 {eval_type} Results:", flush=True)
+        print(f"  Accuracy: {accuracy:.2%} ({correct_answers}/{len(rubrics)})", flush=True)
+        print(f"  Avg Score: {avg_score:.3f}", flush=True)
+        print(f"  Avg Hits: {avg_hits:.2f}", flush=True)
+        print(f"  Avg Reward: {avg_reward:.3f} (median: {median_reward:.3f}, std: {std_reward:.3f})", flush=True)
+        print(f"  Found Correct Profile: {found_correct_profile}/{len(rubrics)} ({found_correct_profile/max(len(rubrics), 1)*100:.1f}%)", flush=True)
+        print(f"  Avg Turns: {avg_turns:.2f}", flush=True)
+        print(f"  Evaluation Time: {eval_time:.1f}s", flush=True)
+        print(f"💾 Eval stats saved to: {eval_log_file}", flush=True)
+        print("="*80, flush=True)
+        print("", flush=True)
         
         self.model.train()
         
@@ -563,6 +679,62 @@ class LinkSearchGRPOTrainer:
     def train(self):
         """Main training loop."""
         logger.info("Starting training...")
+        
+        # Handle baseline evaluation
+        baseline_file = self.output_dir / "baseline_eval.json"
+        if self.global_step == 0:
+            if self.run_baseline_eval:
+                # Run new baseline evaluation
+                print("\n" + "="*80, flush=True)
+                print("🏁 Running Baseline Evaluation (before training)", flush=True)
+                print("="*80, flush=True)
+                baseline_metrics = self._run_evaluation(is_baseline=True)
+                print(f"📊 Baseline Performance:", flush=True)
+                print(f"  Accuracy: {baseline_metrics.accuracy:.2%}", flush=True)
+                print(f"  Avg Score: {baseline_metrics.avg_score:.3f}", flush=True)
+                print(f"  Avg Hits: {baseline_metrics.avg_hits:.2f}", flush=True)
+                print("="*80, flush=True)
+                print("", flush=True)
+                
+                if self.use_wandb:
+                    wandb.log({
+                        "baseline/accuracy": baseline_metrics.accuracy,
+                        "baseline/avg_score": baseline_metrics.avg_score,
+                        "baseline/avg_hits": baseline_metrics.avg_hits,
+                        "baseline/avg_reward": baseline_metrics.avg_reward,
+                    }, step=0)
+            elif baseline_file.exists():
+                # Load baseline from file
+                print("\n" + "="*80, flush=True)
+                print("📂 Loading Baseline Evaluation from file", flush=True)
+                print("="*80, flush=True)
+                try:
+                    with open(baseline_file, 'r') as f:
+                        baseline_stats = json.load(f)
+                    
+                    print(f"✓ Loaded baseline from: {baseline_file}", flush=True)
+                    print(f"📊 Baseline Performance:", flush=True)
+                    print(f"  Accuracy: {baseline_stats.get('accuracy', 0):.2%}", flush=True)
+                    print(f"  Avg Score: {baseline_stats.get('avg_score', 0):.3f}", flush=True)
+                    print(f"  Avg Hits: {baseline_stats.get('avg_hits', 0):.2f}", flush=True)
+                    print(f"  Avg Reward: {baseline_stats.get('avg_reward', 0):.3f}", flush=True)
+                    print("="*80, flush=True)
+                    print("", flush=True)
+                    
+                    if self.use_wandb:
+                        wandb.log({
+                            "baseline/accuracy": baseline_stats.get('accuracy', 0),
+                            "baseline/avg_score": baseline_stats.get('avg_score', 0),
+                            "baseline/avg_hits": baseline_stats.get('avg_hits', 0),
+                            "baseline/avg_reward": baseline_stats.get('avg_reward', 0),
+                        }, step=0)
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to load baseline from file: {e}")
+                    print(f"⚠️  Failed to load baseline: {e}", flush=True)
+            else:
+                print("\n⚠️  Baseline evaluation skipped (RUN_BASELINE_EVAL=false and no baseline file found)", flush=True)
+                print(f"   To run baseline: set RUN_BASELINE_EVAL=true or provide {baseline_file}", flush=True)
+                print("", flush=True)
         
         self.model.train()
         
@@ -624,6 +796,19 @@ class LinkSearchGRPOTrainer:
             all_rewards = [s.reward for g in groups for s in g.samples]
             all_scores = [s.rubric.score for g in groups for s in g.samples]
             
+            # Calculate additional statistics
+            median_reward = float(np.median(all_rewards)) if all_rewards else 0.0
+            reward_std = float(np.std(all_rewards)) if all_rewards else 0.0
+            
+            # Count early exits (rollouts that finished before max turns)
+            num_early_exit = sum(
+                1 for g in groups for s in g.samples 
+                if len(s.conversation) < self.policy_config.max_turns * 2
+            )
+            
+            groups_kept = sum(1 for g in groups if any(s.advantage and s.advantage != 0 for s in g.samples))
+            groups_filtered = sum(1 for g in groups if all(s.advantage is None or s.advantage == 0 for s in g.samples))
+            
             metrics = TrainingMetrics(
                 loss=total_loss / max(num_samples, 1),
                 policy_loss=total_policy_loss / max(num_samples, 1),
@@ -635,20 +820,38 @@ class LinkSearchGRPOTrainer:
                 avg_score=np.mean(all_scores) if all_scores else 0.0,
                 rollout_time=rollout_time,
                 training_time=train_time,
-                groups_kept=sum(1 for g in groups if any(s.advantage and s.advantage != 0 for s in g.samples)),
-                groups_filtered=sum(1 for g in groups if all(s.advantage is None or s.advantage == 0 for s in g.samples)),
+                reward_std=reward_std,
+                groups_kept=groups_kept,
+                groups_filtered=groups_filtered,
             )
             
-            # Log progress
-            print(
-                f"Step {self.global_step}/{self.max_steps} | "
-                f"Loss: {metrics.loss:.4f} | "
-                f"Score: {metrics.avg_score:.3f} | "
-                f"Reward: {metrics.avg_reward:.3f} | "
-                f"Rollout: {rollout_time:.1f}s | "
-                f"Train: {train_time:.1f}s",
-                flush=True
-            )
+            # Log progress (simple mode)
+            if self.verbose:
+                # Detailed mode
+                print("", flush=True)
+                print("="*80, flush=True)
+                print(f"📍 STEP {self.global_step}/{self.max_steps}", flush=True)
+                print("="*80, flush=True)
+                print(f"Loss: {metrics.loss:.4f} | Score: {metrics.avg_score:.3f} | Reward: {metrics.avg_reward:.3f} (median: {median_reward:.3f})", flush=True)
+                print(f"📊 Group Summary:", flush=True)
+                print(f"  - Total groups: {len(groups)}", flush=True)
+                print(f"  - Groups kept for training: {groups_kept}", flush=True)
+                print(f"  - Groups filtered (low variance): {groups_filtered}", flush=True)
+                print(f"  - Rollouts finished early: {num_early_exit}/{len(all_rewards)}", flush=True)
+                print(f"  - Rollout time: {rollout_time:.1f}s", flush=True)
+                print(f"  - Training time: {train_time:.1f}s", flush=True)
+                print("="*80, flush=True)
+            else:
+                # Simple mode
+                print(
+                    f"Step {self.global_step}/{self.max_steps} | "
+                    f"Loss: {metrics.loss:.4f} | "
+                    f"Score: {metrics.avg_score:.3f} | "
+                    f"Reward: {metrics.avg_reward:.3f} | "
+                    f"Groups: {groups_kept}/{len(groups)} | "
+                    f"Rollout: {rollout_time:.1f}s",
+                    flush=True
+                )
             
             # Log to wandb
             if self.use_wandb:
@@ -656,25 +859,52 @@ class LinkSearchGRPOTrainer:
                     "train/loss": metrics.loss,
                     "train/policy_loss": metrics.policy_loss,
                     "train/avg_reward": metrics.avg_reward,
+                    "train/median_reward": median_reward,
+                    "train/reward_std": reward_std,
                     "train/avg_score": metrics.avg_score,
                     "train/accuracy": metrics.accuracy,
                     "train/rollout_time": rollout_time,
                     "train/training_time": train_time,
+                    "train/groups_kept": groups_kept,
+                    "train/groups_filtered": groups_filtered,
+                    "train/num_early_exit": num_early_exit,
                 }, step=self.global_step)
             
             # Evaluation
             if self.global_step % self.eval_steps == 0:
-                eval_metrics = self._run_evaluation()
+                eval_metrics = self._run_evaluation(is_baseline=False)
                 
-                print(
-                    f"\n📊 Eval Step {self.global_step}: "
-                    f"Score={eval_metrics.avg_score:.3f}, "
-                    f"Accuracy={eval_metrics.accuracy:.2%}, "
-                    f"Hits={eval_metrics.avg_hits:.2f}\n",
-                    flush=True
-                )
-                
-                if self.use_wandb:
+                # Load detailed eval stats for wandb logging
+                eval_log_file = self.output_dir / "eval_logs" / f"eval_step_{self.global_step:04d}.json"
+                if self.use_wandb and eval_log_file.exists():
+                    try:
+                        with open(eval_log_file, 'r') as f:
+                            eval_stats = json.load(f)
+                        
+                        wandb.log({
+                            "eval/avg_score": eval_metrics.avg_score,
+                            "eval/accuracy": eval_metrics.accuracy,
+                            "eval/avg_reward": eval_metrics.avg_reward,
+                            "eval/median_reward": eval_stats.get("median_reward", 0.0),
+                            "eval/std_reward": eval_stats.get("std_reward", 0.0),
+                            "eval/min_reward": eval_stats.get("min_reward", 0.0),
+                            "eval/max_reward": eval_stats.get("max_reward", 0.0),
+                            "eval/avg_hits": eval_metrics.avg_hits,
+                            "eval/attempted_answer": eval_stats.get("attempted_answer", 0),
+                            "eval/found_profile_rate": eval_stats.get("found_correct_profile", 0) / max(eval_stats.get("total_samples", 1), 1),
+                            "eval/avg_turns": eval_stats.get("avg_turns", 0.0),
+                        }, step=self.global_step)
+                    except Exception as e:
+                        logger.warning(f"Failed to load eval stats for wandb: {e}")
+                        # Fallback to basic logging
+                        wandb.log({
+                            "eval/avg_score": eval_metrics.avg_score,
+                            "eval/accuracy": eval_metrics.accuracy,
+                            "eval/avg_reward": eval_metrics.avg_reward,
+                            "eval/avg_hits": eval_metrics.avg_hits,
+                        }, step=self.global_step)
+                elif self.use_wandb:
+                    # Fallback to basic logging
                     wandb.log({
                         "eval/avg_score": eval_metrics.avg_score,
                         "eval/accuracy": eval_metrics.accuracy,
@@ -706,13 +936,64 @@ class LinkSearchGRPOTrainer:
             if self.global_step % self.save_steps == 0:
                 self._save_checkpoint(metrics)
         
+        # Calculate training time
+        total_training_time = time.time() - step_start if 'step_start' in locals() else 0
+        
         # Final save
         final_dir = self.output_dir / "final"
         self.model.save_pretrained(str(final_dir))
         self.tokenizer.save_pretrained(str(final_dir))
         
-        print(f"\n✅ Training complete! Best accuracy: {self.best_accuracy:.2%}", flush=True)
-        print(f"📁 Final model: {final_dir}", flush=True)
+        # Print comprehensive training summary
+        print("", flush=True)
+        print("="*80, flush=True)
+        print("🎉 TRAINING SUMMARY", flush=True)
+        print("="*80, flush=True)
+        print(f"Total steps completed: {self.global_step}/{self.max_steps}", flush=True)
+        print(f"Best accuracy achieved: {self.best_accuracy:.2%}", flush=True)
+        print(f"Target accuracy: {self.target_accuracy:.2%}", flush=True)
+        
+        if self.best_accuracy >= self.target_accuracy:
+            print(f"✅ Target accuracy REACHED!", flush=True)
+        else:
+            print(f"⚠️  Target accuracy not reached (stopped early or max steps)", flush=True)
+        
+        if self.evals_without_improvement >= self.patience:
+            print(f"🛑 Stopped due to early stopping (no improvement for {self.patience} evaluations)", flush=True)
+        elif self.global_step >= self.max_steps:
+            print(f"🏁 Stopped: reached max steps", flush=True)
+        elif self.best_accuracy >= self.target_accuracy:
+            print(f"🎯 Stopped: target accuracy reached", flush=True)
+        
+        print("", flush=True)
+        print("📁 Model Locations:", flush=True)
+        print(f"  - Final model: {final_dir}", flush=True)
         if self.best_model_path:
-            print(f"📁 Best model: {self.best_model_path}", flush=True)
+            print(f"  - Best model (accuracy: {self.best_accuracy:.2%}): {self.best_model_path}", flush=True)
+        
+        # Count total checkpoints saved
+        checkpoints = list(self.output_dir.glob("checkpoint-*"))
+        print(f"  - Total checkpoints saved: {len(checkpoints)}", flush=True)
+        
+        # Check for eval logs
+        eval_logs_dir = self.output_dir / "eval_logs"
+        if eval_logs_dir.exists():
+            eval_logs = list(eval_logs_dir.glob("eval_step_*.json"))
+            print(f"  - Evaluation logs: {len(eval_logs)} files in {eval_logs_dir}", flush=True)
+        
+        print("="*80, flush=True)
+        print("✅ Training complete!", flush=True)
+        print("="*80, flush=True)
+        print("", flush=True)
+        
+        logger.info("="*80)
+        logger.info("Training Summary")
+        logger.info("="*80)
+        logger.info(f"Total steps: {self.global_step}/{self.max_steps}")
+        logger.info(f"Best accuracy: {self.best_accuracy:.2%}")
+        logger.info(f"Target accuracy: {self.target_accuracy:.2%}")
+        if self.best_model_path:
+            logger.info(f"Best model: {self.best_model_path}")
+        logger.info(f"Final model: {final_dir}")
+        logger.info("="*80)
 
