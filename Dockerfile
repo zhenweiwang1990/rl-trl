@@ -19,10 +19,21 @@ RUN pip3 install --upgrade pip
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Use BuildKit cache mount to speed up pip installs across builds
+# Install base requirements (without flash-attn and unsloth which need compilation)
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install -r requirements.txt && \
     pip3 uninstall -y pynvml 2>/dev/null || true
+
+# Install Flash Attention from source for maximum compatibility
+# This ensures it's compiled against the exact PyTorch/CUDA versions in this container
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install packaging wheel && \
+    MAX_JOBS=4 pip3 install flash-attn --no-build-isolation
+
+# Install unsloth - let it auto-detect the architecture and CUDA version
+# This works for both Ampere (A100) and Hopper (H100, H200) GPUs
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
 
 # Copy the entire project
 COPY . .

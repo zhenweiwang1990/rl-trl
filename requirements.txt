@@ -5,7 +5,7 @@ accelerate>=1.2.0
 datasets>=3.0.0
 
 # Unsloth for efficient training
-unsloth[cu124_ampere]>=2025.1
+# Will be installed in Dockerfile based on CUDA version detection
 unsloth-zoo>=2025.1
 
 # TRL for GRPO/PPO/DPO training
@@ -38,7 +38,8 @@ python-dotenv>=1.0.0
 # Optimization
 deepspeed>=0.16.0
 ninja>=1.11.0
-flash-attn>=2.5.8  # Critical for fast inference on long sequences
+packaging>=23.0
+# Flash Attention - will be compiled from source in Dockerfile for compatibility
 
 # Utilities
 huggingface-hub>=0.27.0
