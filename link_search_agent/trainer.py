@@ -298,23 +298,33 @@ class LinkSearchGRPOTrainer:
             group_start = time.time()
             group = TrajectoryGroup(query=query, group_id=group_id)
             
+            # Create tasks for parallel execution
+            group_tasks = []
             for rollout_idx in range(num_rollouts):
-                try:
-                    query_start = time.time()
-                    conversation, reward, rubric, rollout_log = await execute_rollout(
-                        query=query,
-                        model=self.model,
-                        tokenizer=self.tokenizer,
-                        policy_config=self.policy_config,
-                        verbose=self.verbose,
-                        log_turns=self.verbose,
-                        rollout_index=rollout_idx,
-                        num_rollouts=num_rollouts,
-                        enable_detailed_logging=self.enable_detailed_logging,
-                        training_step=self.global_step,
-                    )
-                    query_time_ms = (time.time() - query_start) * 1000.0
-                    query_times.append(query_time_ms)
+                task = execute_rollout(
+                    query=query,
+                    model=self.model,
+                    tokenizer=self.tokenizer,
+                    policy_config=self.policy_config,
+                    verbose=self.verbose,
+                    log_turns=self.verbose,
+                    rollout_index=rollout_idx,
+                    num_rollouts=num_rollouts,
+                    enable_detailed_logging=self.enable_detailed_logging,
+                    training_step=self.global_step,
+                )
+                group_tasks.append(task)
+            
+            # Execute rollouts in parallel
+            try:
+                results = await asyncio.gather(*group_tasks, return_exceptions=True)
+                
+                for rollout_idx, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Rollout {rollout_idx} failed for query {query.id}: {result}")
+                        continue
+                    
+                    conversation, reward, rubric, rollout_log = result
                     
                     sample = TrajectorySample(
                         query_id=query.id,
@@ -330,16 +340,18 @@ class LinkSearchGRPOTrainer:
                     
                     if rollout_log:
                         all_rollout_logs.append(rollout_log)
-                    
-                except Exception as e:
-                    logger.error(f"Rollout failed for query {query.id}: {e}")
-                    continue
+                
+            except Exception as e:
+                logger.error(f"Failed to collect rollouts for query {query.id}: {e}")
+                continue
             
             group_time_ms = (time.time() - group_start) * 1000.0
             group_times.append(group_time_ms)
             
             if group.samples:
                 groups.append(group)
+                # Track query times for all successful rollouts in this group
+                query_times.extend([group_time_ms / len(group.samples)] * len(group.samples))
         
         total_time_ms = (time.time() - collection_start) * 1000.0
         

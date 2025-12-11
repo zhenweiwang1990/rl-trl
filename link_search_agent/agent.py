@@ -342,6 +342,8 @@ class LinkSearchAgent:
             repetition_penalty=repetition_penalty,
             do_sample=True,
             pad_token_id=self.tokenizer.pad_token_id,
+            use_cache=True,  # Enable KV cache for faster generation
+            num_beams=1,  # Greedy/sampling only (no beam search overhead)
         )
         
         output_tokens = outputs.shape[1] - input_tokens
