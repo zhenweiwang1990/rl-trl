@@ -395,6 +395,7 @@ def main():
             warmup_steps=get_env_int("WARMUP_STEPS", "10"),
             patience=get_env_int("PATIENCE", "5"),
             min_group_std=get_env_float("MIN_GROUP_STD", "0.05"),
+            rollout_concurrency=get_env_int("ROLLOUT_CONCURRENCY", "4"),  # Control parallel eval
             resume_from_checkpoint=str(resume_from_checkpoint) if resume_from_checkpoint else None,
             use_wandb=wandb_mode != "disabled",
             run_baseline_eval=run_baseline_eval,

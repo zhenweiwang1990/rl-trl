@@ -279,79 +279,110 @@ class LinkSearchGRPOTrainer:
     ) -> Tuple[List[TrajectoryGroup], Dict[str, float]]:
         """Collect rollouts for a batch of queries.
         
+        This method now supports TWO-LEVEL PARALLELISM with controlled concurrency:
+        1. Multiple queries are processed in parallel (batch parallelism)
+        2. Multiple rollouts per query are also parallel (rollout parallelism)
+        3. Concurrency is controlled by rollout_concurrency to prevent GPU OOM
+        
         Returns:
             Tuple of (groups, timing_dict) where timing_dict contains:
             - total_time_ms: Total time for all rollouts
             - avg_query_time_ms: Average time per query
             - avg_group_time_ms: Average time per group
         """
-        groups = []
-        all_rollout_logs = []
-        
+        collection_start = time.time()
         num_rollouts = 1 if is_eval else self.num_rollouts
         
-        collection_start = time.time()
+        # Control concurrency to prevent GPU OOM
+        # During eval, we can be more aggressive with parallelism since we only do 1 rollout per query
+        max_concurrent = self.rollout_concurrency * 2 if is_eval else self.rollout_concurrency
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        # Create a task for processing each query group
+        async def process_query_group(group_id: int, query: LinkSearchQuery):
+            async with semaphore:  # Limit concurrent query groups
+                group_start = time.time()
+                group = TrajectoryGroup(query=query, group_id=group_id)
+                rollout_logs = []
+                
+                # Create tasks for parallel execution of rollouts
+                group_tasks = []
+                for rollout_idx in range(num_rollouts):
+                    task = execute_rollout(
+                        query=query,
+                        model=self.model,
+                        tokenizer=self.tokenizer,
+                        policy_config=self.policy_config,
+                        verbose=self.verbose,
+                        log_turns=self.verbose,
+                        rollout_index=rollout_idx,
+                        num_rollouts=num_rollouts,
+                        enable_detailed_logging=self.enable_detailed_logging,
+                        training_step=self.global_step,
+                    )
+                    group_tasks.append(task)
+                
+                # Execute all rollouts for this query in parallel
+                try:
+                    results = await asyncio.gather(*group_tasks, return_exceptions=True)
+                    
+                    for rollout_idx, result in enumerate(results):
+                        if isinstance(result, Exception):
+                            logger.error(f"Rollout {rollout_idx} failed for query {query.id}: {result}")
+                            continue
+                        
+                        conversation, reward, rubric, rollout_log = result
+                        
+                        sample = TrajectorySample(
+                            query_id=query.id,
+                            query=query,
+                            conversation=conversation,
+                            reward=reward,
+                            rubric=rubric,
+                            rollout_idx=rollout_idx,
+                            group_id=group_id,
+                            rollout_log=rollout_log,
+                        )
+                        group.samples.append(sample)
+                        
+                        if rollout_log:
+                            rollout_logs.append(rollout_log)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to collect rollouts for query {query.id}: {e}")
+                
+                group_time_ms = (time.time() - group_start) * 1000.0
+                return group, group_time_ms, rollout_logs
+        
+        # Execute ALL query groups in parallel (two-level parallelism)
+        # The semaphore will control how many are actually running concurrently
+        query_group_tasks = [
+            process_query_group(group_id, query) 
+            for group_id, query in enumerate(queries)
+        ]
+        
+        # Gather all results
+        all_results = await asyncio.gather(*query_group_tasks, return_exceptions=True)
+        
+        # Process results
+        groups = []
+        all_rollout_logs = []
         group_times = []
         query_times = []
         
-        for group_id, query in enumerate(queries):
-            group_start = time.time()
-            group = TrajectoryGroup(query=query, group_id=group_id)
-            
-            # Create tasks for parallel execution
-            group_tasks = []
-            for rollout_idx in range(num_rollouts):
-                task = execute_rollout(
-                    query=query,
-                    model=self.model,
-                    tokenizer=self.tokenizer,
-                    policy_config=self.policy_config,
-                    verbose=self.verbose,
-                    log_turns=self.verbose,
-                    rollout_index=rollout_idx,
-                    num_rollouts=num_rollouts,
-                    enable_detailed_logging=self.enable_detailed_logging,
-                    training_step=self.global_step,
-                )
-                group_tasks.append(task)
-            
-            # Execute rollouts in parallel
-            try:
-                results = await asyncio.gather(*group_tasks, return_exceptions=True)
-                
-                for rollout_idx, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        logger.error(f"Rollout {rollout_idx} failed for query {query.id}: {result}")
-                        continue
-                    
-                    conversation, reward, rubric, rollout_log = result
-                    
-                    sample = TrajectorySample(
-                        query_id=query.id,
-                        query=query,
-                        conversation=conversation,
-                        reward=reward,
-                        rubric=rubric,
-                        rollout_idx=rollout_idx,
-                        group_id=group_id,
-                        rollout_log=rollout_log,
-                    )
-                    group.samples.append(sample)
-                    
-                    if rollout_log:
-                        all_rollout_logs.append(rollout_log)
-                
-            except Exception as e:
-                logger.error(f"Failed to collect rollouts for query {query.id}: {e}")
+        for result in all_results:
+            if isinstance(result, Exception):
+                logger.error(f"Query group processing failed: {result}")
                 continue
             
-            group_time_ms = (time.time() - group_start) * 1000.0
-            group_times.append(group_time_ms)
+            group, group_time_ms, rollout_logs = result
             
             if group.samples:
                 groups.append(group)
+                group_times.append(group_time_ms)
                 # Track query times for all successful rollouts in this group
                 query_times.extend([group_time_ms / len(group.samples)] * len(group.samples))
+                all_rollout_logs.extend(rollout_logs)
         
         total_time_ms = (time.time() - collection_start) * 1000.0
         
