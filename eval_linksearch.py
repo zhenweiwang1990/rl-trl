@@ -70,10 +70,16 @@ def load_model_and_tokenizer(checkpoint_path: str, max_seq_length: int = 4096):
             device_map="auto",
         )
         
-        # Enable inference mode
+        # Enable inference mode and optimizations
         FastLanguageModel.for_inference(model)
+        model.eval()  # Ensure model is in eval mode
         
-        logger.info("✓ Model loaded successfully")
+        # Configure tokenizer
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"
+        
+        logger.info("✓ Model loaded successfully with inference optimizations")
         return model, tokenizer
     except Exception as e:
         logger.error(f"Failed to load model: {e}")

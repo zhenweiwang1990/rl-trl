@@ -345,6 +345,15 @@ def main():
         model.config.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
     
+    # Enable inference optimizations for faster rollout generation
+    # This will be used during rollout collection but won't affect training
+    try:
+        FastLanguageModel.for_inference(model)
+        print("✓ Enabled inference optimizations for rollout generation", flush=True)
+    except Exception as e:
+        print(f"⚠️  Could not enable inference optimizations: {e}", flush=True)
+        # Continue anyway, model will still work
+    
     print("\n✓ Model loaded successfully", flush=True)
     
     # Load datasets from HuggingFace

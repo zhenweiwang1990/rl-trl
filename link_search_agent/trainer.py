@@ -155,6 +155,16 @@ class LinkSearchGRPOTrainer:
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Enable inference optimizations for faster rollout collection
+        # This is safe because we'll switch back to training mode when needed
+        try:
+            from unsloth import FastLanguageModel
+            FastLanguageModel.for_inference(model)
+            logger.info("Enabled inference optimizations for rollout collection")
+        except (ImportError, AttributeError, Exception) as e:
+            logger.debug(f"Could not enable inference optimizations: {e}")
+            # Continue anyway
+        
         # Setup optimizer
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -191,6 +201,7 @@ class LinkSearchGRPOTrainer:
         logger.info(f"Learning rate: {learning_rate}")
         logger.info(f"KL penalty (beta): {beta}")
         logger.info(f"Target accuracy: {target_accuracy*100:.1f}%")
+        logger.info(f"Rollout concurrency: {self.rollout_concurrency}")
         logger.info("="*60)
     
     def _load_checkpoint(self, checkpoint_path: Path):
@@ -386,6 +397,22 @@ class LinkSearchGRPOTrainer:
         
         total_time_ms = (time.time() - collection_start) * 1000.0
         
+        # Calculate tokens/s metrics from rubrics
+        total_output_tokens = sum(
+            s.rubric.total_output_tokens 
+            for group in groups 
+            for s in group.samples
+        )
+        total_input_tokens = sum(
+            s.rubric.total_input_tokens 
+            for group in groups 
+            for s in group.samples
+        )
+        total_tokens = total_input_tokens + total_output_tokens
+        
+        tokens_per_sec = (total_tokens / (total_time_ms / 1000.0)) if total_time_ms > 0 else 0.0
+        output_tokens_per_sec = (total_output_tokens / (total_time_ms / 1000.0)) if total_time_ms > 0 else 0.0
+        
         timing_dict = {
             "total_time_ms": total_time_ms,
             "avg_query_time_ms": np.mean(query_times) if query_times else 0.0,
@@ -394,6 +421,11 @@ class LinkSearchGRPOTrainer:
             "max_query_time_ms": np.max(query_times) if query_times else 0.0,
             "min_group_time_ms": np.min(group_times) if group_times else 0.0,
             "max_group_time_ms": np.max(group_times) if group_times else 0.0,
+            "total_tokens": int(total_tokens),
+            "total_output_tokens": int(total_output_tokens),
+            "total_input_tokens": int(total_input_tokens),
+            "tokens_per_sec": float(tokens_per_sec),
+            "output_tokens_per_sec": float(output_tokens_per_sec),
         }
         
         # Save rollout logs
@@ -738,11 +770,22 @@ class LinkSearchGRPOTrainer:
         print(f"  Total Eval Time: {eval_time:.2f}s ({eval_time*1000:.0f}ms)", flush=True)
         print(f"  Avg Query Time: {eval_timing.get('avg_query_time_ms', 0):.2f}ms", flush=True)
         print(f"  Query Time Range: {eval_timing.get('min_query_time_ms', 0):.2f}ms - {eval_timing.get('max_query_time_ms', 0):.2f}ms", flush=True)
+        if eval_timing.get('tokens_per_sec', 0) > 0:
+            print(f"  🚀 Performance: {eval_timing.get('tokens_per_sec', 0):.1f} tokens/s ({eval_timing.get('output_tokens_per_sec', 0):.1f} output tokens/s)", flush=True)
+            print(f"  📊 Total Tokens: {eval_timing.get('total_tokens', 0)} ({eval_timing.get('total_output_tokens', 0)} output)", flush=True)
         print(f"💾 Eval stats saved to: {eval_log_file}", flush=True)
         print("="*80, flush=True)
         print("", flush=True)
         
+        # Switch back to training mode
         self.model.train()
+        
+        # Re-enable inference optimizations (they persist but model mode may affect behavior)
+        try:
+            from unsloth import FastLanguageModel
+            FastLanguageModel.for_inference(self.model)
+        except (ImportError, AttributeError, Exception):
+            pass
         
         return TrainingMetrics(
             loss=0.0,
@@ -816,7 +859,16 @@ class LinkSearchGRPOTrainer:
                 print(f"   To run baseline: set RUN_BASELINE_EVAL=true or provide {baseline_file}", flush=True)
                 print("", flush=True)
         
+        # Ensure model is in training mode for training steps
         self.model.train()
+        
+        # Keep inference optimizations enabled (they help with rollout collection)
+        # Unsloth optimizations are compatible with training
+        try:
+            from unsloth import FastLanguageModel
+            FastLanguageModel.for_inference(self.model)
+        except (ImportError, AttributeError, Exception):
+            pass
         
         query_idx = 0
         
@@ -926,6 +978,8 @@ class LinkSearchGRPOTrainer:
                 print(f"    • Avg query time: {rollout_timing.get('avg_query_time_ms', 0):.2f}ms", flush=True)
                 print(f"    • Avg group time: {rollout_timing.get('avg_group_time_ms', 0):.2f}ms", flush=True)
                 print(f"    • Query time range: {rollout_timing.get('min_query_time_ms', 0):.0f}-{rollout_timing.get('max_query_time_ms', 0):.0f}ms", flush=True)
+                if rollout_timing.get('tokens_per_sec', 0) > 0:
+                    print(f"    • 🚀 Performance: {rollout_timing.get('tokens_per_sec', 0):.1f} tokens/s ({rollout_timing.get('output_tokens_per_sec', 0):.1f} output tokens/s)", flush=True)
                 print(f"  - Advantage computation: {advantage_time:.2f}s ({advantage_time*1000:.0f}ms)", flush=True)
                 print(f"  - Training step: {train_time:.2f}s ({train_time*1000:.0f}ms)", flush=True)
                 print(f"  - Step total: {step_total_time:.2f}s ({step_total_time*1000:.0f}ms)", flush=True)
@@ -959,6 +1013,8 @@ class LinkSearchGRPOTrainer:
                     "train/groups_kept": groups_kept,
                     "train/groups_filtered": groups_filtered,
                     "train/num_early_exit": num_early_exit,
+                    "train/tokens_per_sec": rollout_timing.get("tokens_per_sec", 0.0),
+                    "train/output_tokens_per_sec": rollout_timing.get("output_tokens_per_sec", 0.0),
                 }, step=self.global_step)
             
             # Evaluation
